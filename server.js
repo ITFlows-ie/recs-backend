@@ -50,6 +50,12 @@ app.get('/api/recs', async (req, res) => {
     });
     const page = await context.newPage();
 
+    // Pre-consent and enforce EN/US
+    await context.addCookies([
+      { name: 'CONSENT', value: 'YES+1', domain: '.youtube.com', path: '/', httpOnly: false, secure: true },
+      { name: 'PREF', value: 'hl=en&gl=US', domain: '.youtube.com', path: '/', httpOnly: false, secure: true },
+    ]);
+
     const url = `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&hl=en&bpctr=9999999999&has_verified=1&persist_hl=1&persist_gl=1&gl=US`;
     await page.goto(url, { waitUntil: 'networkidle', timeout: NAV_TIMEOUT });
 
@@ -64,24 +70,50 @@ app.get('/api/recs', async (req, res) => {
       })
       .catch(() => {});
 
-    const items = await page.$$eval('ytd-compact-video-renderer', (cards, max) => {
+    // Primary: read from ytInitialData (more reliable than DOM scraping)
+    let items = await page.evaluate((max) => {
+      const data = window.ytInitialData;
+      const results =
+        data?.contents?.twoColumnWatchNextResults?.secondaryResults?.secondaryResults?.results || [];
       const out = [];
       const seen = new Set();
-      for (const card of cards) {
-        if (out.length >= max) break;
-        const link = card.querySelector('a#thumbnail');
-        const href = link?.getAttribute('href') || '';
-        const m = href.match(/v=([\w-]{6,})/);
-        const id = m ? m[1] : '';
+      for (const r of results) {
+        const compact = r.compactVideoRenderer || r.compactAutoplayRenderer?.content?.compactVideoRenderer;
+        if (!compact) continue;
+        const id = compact.videoId;
         if (!id || seen.has(id)) continue;
         seen.add(id);
-        const titleEl = card.querySelector('#video-title');
-        const title = titleEl?.textContent?.trim() || id;
-        const thumb = link?.querySelector('img')?.src || `https://img.youtube.com/vi/${id}/hqdefault.jpg`;
+        const titleRuns = compact.title?.runs || [];
+        const title = titleRuns.map(t => t.text || '').join('') || id;
+        const thumbs = compact.thumbnail?.thumbnails || [];
+        const thumb = (thumbs[thumbs.length - 1] || thumbs[0] || {}).url || `https://img.youtube.com/vi/${id}/hqdefault.jpg`;
         out.push({ id, title, thumb });
+        if (out.length >= max) break;
       }
       return out;
     }, MAX_ITEMS);
+
+    // Fallback: DOM scrape if initial data is empty
+    if (!items || items.length === 0) {
+      items = await page.$$eval('ytd-compact-video-renderer', (cards, max) => {
+        const out = [];
+        const seen = new Set();
+        for (const card of cards) {
+          if (out.length >= max) break;
+          const link = card.querySelector('a#thumbnail');
+          const href = link?.getAttribute('href') || '';
+          const m = href.match(/v=([\w-]{6,})/);
+          const id = m ? m[1] : '';
+          if (!id || seen.has(id)) continue;
+          seen.add(id);
+          const titleEl = card.querySelector('#video-title');
+          const title = titleEl?.textContent?.trim() || id;
+          const thumb = link?.querySelector('img')?.src || `https://img.youtube.com/vi/${id}/hqdefault.jpg`;
+          out.push({ id, title, thumb });
+        }
+        return out;
+      }, MAX_ITEMS);
+    }
 
     await page.close();
     await context.close();
