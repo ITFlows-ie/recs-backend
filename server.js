@@ -95,16 +95,25 @@ app.get('/api/recs', async (req, res) => {
           // Extract title from metadata
           const titleText = lvm.metadata?.lockupMetadataViewModel?.title?.content || id;
 
-          // Extract thumbnail from contentImage
-          const thumbSources = lvm.contentImage?.collectionThumbnailViewModel?.primaryThumbnail?.thumbnailViewModel?.image?.sources || [];
+          // Extract thumbnail from contentImage (try both structures)
+          const thumbVM = lvm.contentImage?.thumbnailViewModel || lvm.contentImage?.collectionThumbnailViewModel?.primaryThumbnail?.thumbnailViewModel;
+          const thumbSources = thumbVM?.image?.sources || [];
           const thumb = (thumbSources[thumbSources.length - 1] || thumbSources[0] || {}).url || `https://img.youtube.com/vi/${id}/hqdefault.jpg`;
 
-          // Try to extract duration from metadata rows (best-effort)
-          const rows = lvm.metadata?.lockupMetadataViewModel?.metadataRows || [];
-          const duration = rows
-            .flatMap(row => row.metadataParts || [])
-            .map(p => p.text || p.content || '')
-            .find(txt => typeof txt === 'string' && /\d+:\d{2}(?::\d{2})?/.test(txt)) || null;
+          // Extract duration from thumbnailOverlayBadgeViewModel
+          let duration = null;
+          const overlays = thumbVM?.overlays || [];
+          for (const ov of overlays) {
+            const badges = ov.thumbnailOverlayBadgeViewModel?.thumbnailBadges || [];
+            for (const badge of badges) {
+              const txt = badge.thumbnailBadgeViewModel?.text;
+              if (txt && /\d+:\d{2}(?::\d{2})?/.test(txt)) {
+                duration = txt;
+                break;
+              }
+            }
+            if (duration) break;
+          }
 
           out.push({ id, title: titleText, thumb, duration });
           if (out.length >= max) break;
