@@ -193,20 +193,27 @@ app.get('/api/debug', async (req, res) => {
       const secondary = twoCol?.secondaryResults?.secondaryResults;
       const results = secondary?.results || [];
       
-      // Find what types of items are in results
-      const itemTypes = results.map(r => Object.keys(r)[0]).slice(0, 20);
-      
-      // Look for videos in different possible locations
-      let sampleItems = [];
-      for (const r of results.slice(0, 5)) {
-        const key = Object.keys(r)[0];
-        const item = r[key];
-        sampleItems.push({
-          type: key,
-          hasVideoId: !!item?.videoId,
-          videoId: item?.videoId || null,
-          keys: Object.keys(item || {}).slice(0, 10),
-        });
+      // Find first lockupViewModel and dump its full structure
+      const firstLockup = results.find(r => r.lockupViewModel);
+      let lockupDump = null;
+      if (firstLockup) {
+        const lvm = firstLockup.lockupViewModel;
+        lockupDump = {
+          contentId: lvm.contentId,
+          contentType: lvm.contentType,
+          contentImageKeys: Object.keys(lvm.contentImage || {}),
+          metadataKeys: Object.keys(lvm.metadata || {}),
+          // Dump lockupMetadataViewModel structure
+          lockupMetadata: lvm.metadata?.lockupMetadataViewModel ? {
+            keys: Object.keys(lvm.metadata.lockupMetadataViewModel),
+            title: lvm.metadata.lockupMetadataViewModel.title,
+            metadataRows: lvm.metadata.lockupMetadataViewModel.metadataRows,
+          } : null,
+          // Look for thumbnailOverlays or similar
+          rendererContext: lvm.rendererContext ? Object.keys(lvm.rendererContext) : null,
+          // Full contentImage structure
+          contentImageFull: lvm.contentImage,
+        };
       }
       
       return {
@@ -214,8 +221,7 @@ app.get('/api/debug', async (req, res) => {
         hasTwoColumn: !!twoCol,
         hasSecondary: !!secondary,
         resultsCount: results.length,
-        itemTypes,
-        sampleItems,
+        lockupDump,
       };
     });
 
