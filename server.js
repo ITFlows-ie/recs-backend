@@ -26,19 +26,18 @@ app.use((req, res, next) => {
 });
 
 let browser; // reuse browser between requests to reduce cold start
+let cachedContext = null; // reuse context for faster requests
 
-app.get('/api/recs', async (req, res) => {
-  const videoId = (req.query.v || '').trim();
-  if (!videoId) return res.status(400).json({ items: [], error: 'missing_video_id' });
-  if (!/^[a-zA-Z0-9_-]{6,}$/.test(videoId)) {
-    return res.status(400).json({ items: [], error: 'bad_video_id' });
+// Simple in-memory cache (videoId -> {items, ts})
+const recsCache = new Map();
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+async function getContext() {
+  if (!browser) {
+    browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
   }
-
-  try {
-    if (!browser) {
-      browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
-    }
-    const context = await browser.newContext({
+  if (!cachedContext) {
+    cachedContext = await browser.newContext({
       viewport: { width: 1280, height: 720 },
       userAgent: UA,
       locale: 'en-US',
@@ -48,27 +47,34 @@ app.get('/api/recs', async (req, res) => {
         'Sec-CH-UA-Mobile': '?0',
       },
     });
-    const page = await context.newPage();
-
-    // Pre-consent and enforce EN/US
-    await context.addCookies([
+    await cachedContext.addCookies([
       { name: 'CONSENT', value: 'YES+1', domain: '.youtube.com', path: '/', httpOnly: false, secure: true },
       { name: 'PREF', value: 'hl=en&gl=US', domain: '.youtube.com', path: '/', httpOnly: false, secure: true },
     ]);
+  }
+  return cachedContext;
+}
 
-    const url = `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&hl=en&bpctr=9999999999&has_verified=1&persist_hl=1&persist_gl=1&gl=US`;
-    await page.goto(url, { waitUntil: 'networkidle', timeout: NAV_TIMEOUT });
+app.get('/api/recs', async (req, res) => {
+  const videoId = (req.query.v || '').trim();
+  if (!videoId) return res.status(400).json({ items: [], error: 'missing_video_id' });
+  if (!/^[a-zA-Z0-9_-]{6,}$/.test(videoId)) {
+    return res.status(400).json({ items: [], error: 'bad_video_id' });
+  }
 
-    // Try to accept consent if it appears
-    const acceptBtn = page.locator('button:has-text("Accept all")');
-    await acceptBtn.click({ timeout: 4000 }).catch(() => {});
+  // Check cache first
+  const cached = recsCache.get(videoId);
+  if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
+    return res.json({ items: cached.items, cached: true });
+  }
 
-    // Wait for recommendation container or cards
-    await page
-      .waitForSelector('ytd-rich-item-renderer, ytd-compact-video-renderer', {
-        timeout: SELECTOR_TIMEOUT,
-      })
-      .catch(() => {});
+  try {
+    const context = await getContext();
+    const page = await context.newPage();
+
+    const url = `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&hl=en&gl=US`;
+    // Use 'domcontentloaded' - much faster, ytInitialData is in initial HTML
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
 
     // Primary: read from ytInitialData (supports both new lockupViewModel and legacy compactVideoRenderer)
     let items = await page.evaluate((max) => {
@@ -153,7 +159,10 @@ app.get('/api/recs', async (req, res) => {
     }
 
     await page.close();
-    await context.close();
+    // Don't close context - reuse it
+
+    // Cache the result
+    recsCache.set(videoId, { items, ts: Date.now() });
 
     return res.json({ items });
   } catch (e) {
