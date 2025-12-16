@@ -85,15 +85,22 @@ app.get('/api/recs', async (req, res) => {
           const id = lvm.contentId;
           if (!id || seen.has(id)) continue;
           seen.add(id);
-          
+
           // Extract title from metadata
           const titleText = lvm.metadata?.lockupMetadataViewModel?.title?.content || id;
-          
+
           // Extract thumbnail from contentImage
           const thumbSources = lvm.contentImage?.collectionThumbnailViewModel?.primaryThumbnail?.thumbnailViewModel?.image?.sources || [];
           const thumb = (thumbSources[thumbSources.length - 1] || thumbSources[0] || {}).url || `https://img.youtube.com/vi/${id}/hqdefault.jpg`;
-          
-          out.push({ id, title: titleText, thumb });
+
+          // Try to extract duration from metadata rows (best-effort)
+          const rows = lvm.metadata?.lockupMetadataViewModel?.metadataRows || [];
+          const duration = rows
+            .flatMap(row => row.metadataParts || [])
+            .map(p => p.text || p.content || '')
+            .find(txt => typeof txt === 'string' && /\d+:\d{2}(?::\d{2})?/.test(txt)) || null;
+
+          out.push({ id, title: titleText, thumb, duration });
           if (out.length >= max) break;
           continue;
         }
@@ -108,7 +115,13 @@ app.get('/api/recs', async (req, res) => {
         const title = titleRuns.map(t => t.text || '').join('') || id;
         const thumbs = compact.thumbnail?.thumbnails || [];
         const thumb = (thumbs[thumbs.length - 1] || thumbs[0] || {}).url || `https://img.youtube.com/vi/${id}/hqdefault.jpg`;
-        out.push({ id, title, thumb });
+        const duration = compact.lengthText?.simpleText
+          || compact.lengthText?.accessibility?.accessibilityData?.label
+          || (compact.thumbnailOverlays || [])
+            .map(o => o.thumbnailOverlayTimeStatusRenderer?.text?.simpleText || '')
+            .find(txt => /\d+:\d{2}(?::\d{2})?/.test(txt))
+          || null;
+        out.push({ id, title, thumb, duration });
         if (out.length >= max) break;
       }
       return out;
@@ -130,7 +143,10 @@ app.get('/api/recs', async (req, res) => {
           const titleEl = card.querySelector('#video-title, h3');
           const title = titleEl?.textContent?.trim() || id;
           const thumb = link?.querySelector('img')?.src || `https://img.youtube.com/vi/${id}/hqdefault.jpg`;
-          out.push({ id, title, thumb });
+          // Try to read duration overlay text if present
+          const durEl = card.querySelector('span.ytd-thumbnail-overlay-time-status-renderer');
+          const duration = durEl?.textContent?.trim() || null;
+          out.push({ id, title, thumb, duration });
         }
         return out;
       }, MAX_ITEMS);
