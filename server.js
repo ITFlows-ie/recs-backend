@@ -125,6 +125,53 @@ app.get('/api/recs', async (req, res) => {
   }
 });
 
+// Debug endpoint - returns page HTML and screenshot to diagnose scraping issues
+app.get('/api/debug', async (req, res) => {
+  const videoId = (req.query.v || 'dQw4w9WgXcQ').trim();
+  try {
+    if (!browser) {
+      browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
+    }
+    const context = await browser.newContext({
+      viewport: { width: 1280, height: 720 },
+      userAgent: UA,
+      locale: 'en-US',
+      extraHTTPHeaders: { 'Accept-Language': ACCEPT_LANGUAGE },
+    });
+    const page = await context.newPage();
+    await context.addCookies([
+      { name: 'CONSENT', value: 'YES+1', domain: '.youtube.com', path: '/', httpOnly: false, secure: true },
+      { name: 'PREF', value: 'hl=en&gl=US', domain: '.youtube.com', path: '/', httpOnly: false, secure: true },
+    ]);
+    const url = `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&hl=en&gl=US`;
+    await page.goto(url, { waitUntil: 'networkidle', timeout: NAV_TIMEOUT });
+    await page.waitForTimeout(3000);
+
+    const screenshot = await page.screenshot({ encoding: 'base64' });
+    const html = await page.content();
+    const hasYtInitialData = html.includes('ytInitialData');
+    const hasSecondaryResults = html.includes('secondaryResults');
+    const hasCompactVideo = html.includes('compactVideoRenderer');
+
+    await page.close();
+    await context.close();
+
+    return res.json({
+      videoId,
+      url,
+      htmlLength: html.length,
+      hasYtInitialData,
+      hasSecondaryResults,
+      hasCompactVideo,
+      htmlSnippet: html.substring(0, 2000),
+      screenshot: `data:image/png;base64,${screenshot}`,
+    });
+  } catch (e) {
+    console.error('debug error', e);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
 // Fallback 404
 app.use((req, res) => {
   res.status(404).json({ error: 'not_found' });
