@@ -125,7 +125,7 @@ app.get('/api/recs', async (req, res) => {
   }
 });
 
-// Debug endpoint - returns page HTML and screenshot to diagnose scraping issues
+// Debug endpoint - returns ytInitialData structure to diagnose scraping issues
 app.get('/api/debug', async (req, res) => {
   const videoId = (req.query.v || 'dQw4w9WgXcQ').trim();
   try {
@@ -147,11 +147,40 @@ app.get('/api/debug', async (req, res) => {
     await page.goto(url, { waitUntil: 'networkidle', timeout: NAV_TIMEOUT });
     await page.waitForTimeout(3000);
 
-    const screenshot = await page.screenshot({ encoding: 'base64' });
-    const html = await page.content();
-    const hasYtInitialData = html.includes('ytInitialData');
-    const hasSecondaryResults = html.includes('secondaryResults');
-    const hasCompactVideo = html.includes('compactVideoRenderer');
+    // Extract ytInitialData directly from window object
+    const debugInfo = await page.evaluate(() => {
+      const data = window.ytInitialData;
+      if (!data) return { error: 'no ytInitialData in window' };
+      
+      const twoCol = data?.contents?.twoColumnWatchNextResults;
+      const secondary = twoCol?.secondaryResults?.secondaryResults;
+      const results = secondary?.results || [];
+      
+      // Find what types of items are in results
+      const itemTypes = results.map(r => Object.keys(r)[0]).slice(0, 20);
+      
+      // Look for videos in different possible locations
+      let sampleItems = [];
+      for (const r of results.slice(0, 5)) {
+        const key = Object.keys(r)[0];
+        const item = r[key];
+        sampleItems.push({
+          type: key,
+          hasVideoId: !!item?.videoId,
+          videoId: item?.videoId || null,
+          keys: Object.keys(item || {}).slice(0, 10),
+        });
+      }
+      
+      return {
+        hasContents: !!data?.contents,
+        hasTwoColumn: !!twoCol,
+        hasSecondary: !!secondary,
+        resultsCount: results.length,
+        itemTypes,
+        sampleItems,
+      };
+    });
 
     await page.close();
     await context.close();
@@ -159,12 +188,7 @@ app.get('/api/debug', async (req, res) => {
     return res.json({
       videoId,
       url,
-      htmlLength: html.length,
-      hasYtInitialData,
-      hasSecondaryResults,
-      hasCompactVideo,
-      htmlSnippet: html.substring(0, 2000),
-      screenshot: `data:image/png;base64,${screenshot}`,
+      debugInfo,
     });
   } catch (e) {
     console.error('debug error', e);
