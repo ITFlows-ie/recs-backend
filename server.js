@@ -2,12 +2,17 @@
 // Usage: node server.js  -> http://localhost:3000/api/recs?v=<VIDEO_ID>
 
 const express = require('express');
-const { chromium } = require('playwright');
+const { chromium, devices } = require('playwright');
 
 const PORT = process.env.PORT || 3000;
 const MAX_ITEMS = 12;
 const NAV_TIMEOUT = 20000;
-const SELECTOR_TIMEOUT = 10000;
+const SELECTOR_TIMEOUT = 12000;
+
+// Mimic a desktop Chrome UA to avoid lightweight pages
+const UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+const ACCEPT_LANGUAGE = 'en-US,en;q=0.9';
 
 const app = express();
 
@@ -31,16 +36,33 @@ app.get('/api/recs', async (req, res) => {
 
   try {
     if (!browser) {
-      browser = await chromium.launch({ headless: true });
+      browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
     }
-    const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+    const context = await browser.newContext({
+      viewport: { width: 1280, height: 720 },
+      userAgent: UA,
+      locale: 'en-US',
+      extraHTTPHeaders: {
+        'Accept-Language': ACCEPT_LANGUAGE,
+        'Sec-CH-UA-Platform': '"Windows"',
+        'Sec-CH-UA-Mobile': '?0',
+      },
+    });
     const page = await context.newPage();
 
-    const url = `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&hl=en`;
+    const url = `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&hl=en&bpctr=9999999999&has_verified=1&persist_hl=1&persist_gl=1&gl=US`;
     await page.goto(url, { waitUntil: 'networkidle', timeout: NAV_TIMEOUT });
 
-    // Try to wait for recommendation cards; ignore timeout if absent
-    await page.waitForSelector('ytd-compact-video-renderer', { timeout: SELECTOR_TIMEOUT }).catch(() => {});
+    // Try to accept consent if it appears
+    const acceptBtn = page.locator('button:has-text("Accept all")');
+    await acceptBtn.click({ timeout: 4000 }).catch(() => {});
+
+    // Wait for recommendation container or cards
+    await page
+      .waitForSelector('ytd-compact-video-renderer, ytd-item-section-renderer ytd-compact-video-renderer', {
+        timeout: SELECTOR_TIMEOUT,
+      })
+      .catch(() => {});
 
     const items = await page.$$eval('ytd-compact-video-renderer', (cards, max) => {
       const out = [];
