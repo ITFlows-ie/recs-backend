@@ -65,19 +65,40 @@ app.get('/api/recs', async (req, res) => {
 
     // Wait for recommendation container or cards
     await page
-      .waitForSelector('ytd-compact-video-renderer, ytd-item-section-renderer ytd-compact-video-renderer', {
+      .waitForSelector('ytd-rich-item-renderer, ytd-compact-video-renderer', {
         timeout: SELECTOR_TIMEOUT,
       })
       .catch(() => {});
 
-    // Primary: read from ytInitialData (more reliable than DOM scraping)
+    // Primary: read from ytInitialData (supports both new lockupViewModel and legacy compactVideoRenderer)
     let items = await page.evaluate((max) => {
       const data = window.ytInitialData;
       const results =
         data?.contents?.twoColumnWatchNextResults?.secondaryResults?.secondaryResults?.results || [];
       const out = [];
       const seen = new Set();
+      
       for (const r of results) {
+        // New format: lockupViewModel (2024+)
+        if (r.lockupViewModel) {
+          const lvm = r.lockupViewModel;
+          const id = lvm.contentId;
+          if (!id || seen.has(id)) continue;
+          seen.add(id);
+          
+          // Extract title from metadata
+          const titleText = lvm.metadata?.lockupMetadataViewModel?.title?.content || id;
+          
+          // Extract thumbnail from contentImage
+          const thumbSources = lvm.contentImage?.collectionThumbnailViewModel?.primaryThumbnail?.thumbnailViewModel?.image?.sources || [];
+          const thumb = (thumbSources[thumbSources.length - 1] || thumbSources[0] || {}).url || `https://img.youtube.com/vi/${id}/hqdefault.jpg`;
+          
+          out.push({ id, title: titleText, thumb });
+          if (out.length >= max) break;
+          continue;
+        }
+        
+        // Legacy format: compactVideoRenderer
         const compact = r.compactVideoRenderer || r.compactAutoplayRenderer?.content?.compactVideoRenderer;
         if (!compact) continue;
         const id = compact.videoId;
@@ -95,18 +116,18 @@ app.get('/api/recs', async (req, res) => {
 
     // Fallback: DOM scrape if initial data is empty
     if (!items || items.length === 0) {
-      items = await page.$$eval('ytd-compact-video-renderer', (cards, max) => {
+      items = await page.$$eval('ytd-rich-item-renderer, ytd-compact-video-renderer', (cards, max) => {
         const out = [];
         const seen = new Set();
         for (const card of cards) {
           if (out.length >= max) break;
-          const link = card.querySelector('a#thumbnail');
+          const link = card.querySelector('a#thumbnail, a[href*="watch"]');
           const href = link?.getAttribute('href') || '';
           const m = href.match(/v=([\w-]{6,})/);
           const id = m ? m[1] : '';
           if (!id || seen.has(id)) continue;
           seen.add(id);
-          const titleEl = card.querySelector('#video-title');
+          const titleEl = card.querySelector('#video-title, h3');
           const title = titleEl?.textContent?.trim() || id;
           const thumb = link?.querySelector('img')?.src || `https://img.youtube.com/vi/${id}/hqdefault.jpg`;
           out.push({ id, title, thumb });
